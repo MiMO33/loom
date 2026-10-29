@@ -4,8 +4,9 @@ package gui
 
 /*
 #cgo CFLAGS: -x objective-c
-#cgo LDFLAGS: -framework Cocoa
+#cgo LDFLAGS: -framework Cocoa -framework WebKit
 #import <Cocoa/Cocoa.h>
+#import <WebKit/WebKit.h>
 #import <crt_externs.h>
 #import <mach-o/loader.h>
 #import <objc/runtime.h>
@@ -83,6 +84,37 @@ static NSRect sheetBelowTitlebar(id self, SEL _cmd, NSWindow *w, NSWindow *sheet
 	return r;
 }
 
+static void runJSAlert(id self, SEL _cmd, WKWebView *webView, NSString *message, WKFrameInfo *frame, void (^completionHandler)(void)) {
+	NSAlert *alert = [[[NSAlert alloc] init] autorelease];
+	alert.messageText = message ?: @"";
+	[alert addButtonWithTitle:@"好"];
+	NSWindow *w = webView.window;
+	if (w != nil) {
+		[alert beginSheetModalForWindow:w completionHandler:^(NSModalResponse returnCode) {
+			completionHandler();
+		}];
+	} else {
+		[alert runModal];
+		completionHandler();
+	}
+}
+
+static void runJSConfirm(id self, SEL _cmd, WKWebView *webView, NSString *message, WKFrameInfo *frame, void (^completionHandler)(BOOL)) {
+	NSAlert *alert = [[[NSAlert alloc] init] autorelease];
+	alert.messageText = message ?: @"";
+	[alert addButtonWithTitle:@"确认"];
+	[alert addButtonWithTitle:@"取消"];
+	NSWindow *w = webView.window;
+	if (w != nil) {
+		[alert beginSheetModalForWindow:w completionHandler:^(NSModalResponse returnCode) {
+			completionHandler(returnCode == NSAlertFirstButtonReturn);
+		}];
+	} else {
+		NSModalResponse returnCode = [alert runModal];
+		completionHandler(returnCode == NSAlertFirstButtonReturn);
+	}
+}
+
 static NSEvent *firstPress(NSEvent *e) {
 	NSWindow *w = e.window;
 	LoomLights *l = w == nil ? nil : objc_getAssociatedObject(w, &lightsKey);
@@ -110,8 +142,19 @@ static BOOL designOf26(void) {
 }
 
 static void insetLights(void *p) {
-	if (!designOf26()) return;
 	NSWindow *w = (NSWindow *)p;
+	if (w == nil) return;
+	id d = w.delegate;
+	if (d != nil) {
+		Class cls = [d class];
+		SEL alertSel = @selector(webView:runJavaScriptAlertPanelWithMessage:initiatedByFrame:completionHandler:);
+		if (![d respondsToSelector:alertSel])
+			class_addMethod(cls, alertSel, (IMP)runJSAlert, protocol_getMethodDescription(@protocol(WKUIDelegate), alertSel, NO, YES).types);
+		SEL confirmSel = @selector(webView:runJavaScriptConfirmPanelWithMessage:initiatedByFrame:completionHandler:);
+		if (![d respondsToSelector:confirmSel])
+			class_addMethod(cls, confirmSel, (IMP)runJSConfirm, protocol_getMethodDescription(@protocol(WKUIDelegate), confirmSel, NO, YES).types);
+	}
+	if (!designOf26()) return;
 	if (w.toolbar == nil || objc_getAssociatedObject(w, &lightsKey) != nil) return;
 	if (w.windowTitlebarLayoutDirection == NSUserInterfaceLayoutDirectionRightToLeft) return;
 	NSView *bar = [w standardWindowButton:NSWindowCloseButton].superview, *box = bar.superview, *frame = box.superview;
@@ -142,7 +185,6 @@ static void insetLights(void *p) {
 		[NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskLeftMouseDown handler:^NSEvent *(NSEvent *e) { return firstPress(e); }];
 	}
 	SEL s = @selector(window:willPositionSheet:usingRect:);
-	id d = w.delegate;
 	if (d != nil && ![d respondsToSelector:s])
 		class_addMethod([d class], s, (IMP)sheetBelowTitlebar, protocol_getMethodDescription(@protocol(NSWindowDelegate), s, NO, YES).types);
 	w.toolbar = nil;

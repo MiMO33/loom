@@ -1,4 +1,4 @@
-import ReactMarkdown from 'react-markdown';
+import ReactMarkdown, { defaultUrlTransform } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { Download, ExternalLink, File, FileText, Pencil, Terminal } from 'lucide-react';
 import { toolLabels, statusLabels, type Session, type TaskFile, type Tool } from '../shared/types';
@@ -58,11 +58,23 @@ export function SessionRow({ session, now, compact = false, onAttach }: { sessio
   </div>;
 }
 
-export function Markdown({ text }: { text: string }) {
-  return <div className="markdown"><ReactMarkdown remarkPlugins={[remarkGfm]} components={{
-    a: props => <a {...props} target="_blank" rel="noreferrer" />,
-    img: props => <img {...props} loading="lazy" alt={props.alt || '需求图片'} />,
-  }}>{text}</ReactMarkdown></div>;
+export function Markdown({ text, resolveImageSrc }: { text: string; resolveImageSrc?: (src: string) => string }) {
+  return <div className="markdown"><ReactMarkdown
+    remarkPlugins={[remarkGfm]}
+    urlTransform={(url, key) => {
+      if (key === 'src' && (url.startsWith('attachment:') || url.startsWith('blob:') || url.startsWith('data:'))) {
+        return url;
+      }
+      return defaultUrlTransform(url);
+    }}
+    components={{
+      a: props => <a {...props} target="_blank" rel="noreferrer" />,
+      img: ({ src, alt, ...props }) => {
+        const resolvedSrc = src && resolveImageSrc ? resolveImageSrc(src) : src;
+        return <img {...props} src={resolvedSrc} loading="lazy" alt={alt || '需求图片'} />;
+      },
+    }}
+  >{text}</ReactMarkdown></div>;
 }
 
 export function Files({ files, taskId, open, editMarkdown, remove }: { files: TaskFile[]; taskId: string; open: (id: string) => void; editMarkdown?: (file: TaskFile) => void; remove?: (id: string) => void }) {

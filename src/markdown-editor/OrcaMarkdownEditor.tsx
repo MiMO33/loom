@@ -38,7 +38,7 @@ import {
   Workflow,
   X,
 } from 'lucide-react';
-import { api, copyText, post } from '../api';
+import { api, confirmAction, copyText, post } from '../api';
 import { Markdown } from '../components';
 import { createRichMarkdownExtensions } from './extensions';
 import {
@@ -80,6 +80,21 @@ export interface OrcaMarkdownEditorProps {
   defaultMode?: MarkdownEditorMode;
   onSave?: (currentValue: string) => void;
   onPasteOrDropFiles?: (files: File[]) => void;
+  resolveImageSrc?: (src: string) => string;
+}
+
+function getClipboardImageFiles(data: DataTransfer | null | undefined): File[] {
+  if (!data) return [];
+  const fromFiles = Array.from(data.files ?? []).filter(f => f.type.startsWith('image/'));
+  if (fromFiles.length > 0) return fromFiles;
+  const fromItems: File[] = [];
+  for (const item of Array.from(data.items ?? [])) {
+    if (item.kind === 'file' && item.type.startsWith('image/')) {
+      const file = item.getAsFile();
+      if (file) fromItems.push(file);
+    }
+  }
+  return fromItems;
 }
 
 export function OrcaMarkdownEditor({
@@ -91,6 +106,7 @@ export function OrcaMarkdownEditor({
   defaultMode = 'rich',
   onSave,
   onPasteOrDropFiles,
+  resolveImageSrc,
 }: OrcaMarkdownEditorProps): React.JSX.Element {
   const [mode, setMode] = useState<MarkdownEditorMode>(defaultMode);
   const [showToc, setShowToc] = useState(false);
@@ -119,6 +135,11 @@ export function OrcaMarkdownEditor({
   onSaveRef.current = onSave;
   const onPasteOrDropFilesRef = useRef(onPasteOrDropFiles);
   onPasteOrDropFilesRef.current = onPasteOrDropFiles;
+  const resolveImageSrcRef = useRef(resolveImageSrc);
+  resolveImageSrcRef.current = resolveImageSrc;
+  const resolveSrc = useCallback((src: string) => {
+    return resolveImageSrcRef.current ? resolveImageSrcRef.current(src) : src;
+  }, []);
 
   const slashMenuRef = useRef<SlashMenuState | null>(null);
   slashMenuRef.current = slashMenu;
@@ -192,7 +213,10 @@ export function OrcaMarkdownEditor({
     return true;
   }, []);
 
-  const extensions = useMemo(() => createRichMarkdownExtensions(placeholder), [placeholder]);
+  const extensions = useMemo(
+    () => createRichMarkdownExtensions(placeholder, resolveSrc),
+    [placeholder, resolveSrc],
+  );
 
   const editor = useEditor(
     {
@@ -207,10 +231,10 @@ export function OrcaMarkdownEditor({
           spellcheck: 'true',
         },
         handlePaste: (_view, event) => {
-          const files = Array.from(event.clipboardData?.files ?? []);
-          if (files.some(f => f.type.startsWith('image/'))) {
+          const images = getClipboardImageFiles(event.clipboardData);
+          if (images.length > 0) {
             event.preventDefault();
-            return insertImageFiles(files);
+            return insertImageFiles(images);
           }
           return false;
         },
@@ -940,7 +964,7 @@ export function OrcaMarkdownEditor({
                 }
               }}
               onPaste={e => {
-                const files = Array.from(e.clipboardData.files).filter(f => f.type.startsWith('image/'));
+                const files = getClipboardImageFiles(e.clipboardData);
                 if (files.length && onPasteOrDropFiles) {
                   e.preventDefault();
                   onPasteOrDropFiles(files);
@@ -951,7 +975,7 @@ export function OrcaMarkdownEditor({
 
           {mode === 'preview' && (
             <div className="orca-markdown-preview-pane">
-              <Markdown text={bodyValue || '*暂无内容*'} />
+              <Markdown text={bodyValue || '*暂无内容*'} resolveImageSrc={resolveSrc} />
             </div>
           )}
         </div>
@@ -1026,7 +1050,6 @@ export function MarkdownDocumentModal({
           }),
         });
         setInitialContent(textToSave);
-        notify('Markdown 文档已保存');
         onSaved?.();
       } catch (err) {
         setError((err as Error).message);
@@ -1034,16 +1057,20 @@ export function MarkdownDocumentModal({
         setSaving(false);
       }
     },
-    [content, target.taskId, target.fileId, target.archive, notify, onSaved],
+    [content, target.taskId, target.fileId, target.archive, onSaved],
   );
 
   return (
     <div
       className="orca-doc-modal-backdrop"
       onClick={() => {
-        if (!dirty || window.confirm('文档有未保存的修改，确定关闭吗？')) {
+        if (!dirty) {
           onClose();
+          return;
         }
+        void confirmAction('放弃未保存的修改？', '文档有未保存的修改，确定关闭吗？', '放弃修改').then(confirmed => {
+          if (confirmed) onClose();
+        });
       }}
     >
       <section
@@ -1105,9 +1132,13 @@ export function MarkdownDocumentModal({
               className="icon-button"
               aria-label="关闭编辑器"
               onClick={() => {
-                if (!dirty || window.confirm('文档有未保存的修改，确定关闭吗？')) {
+                if (!dirty) {
                   onClose();
+                  return;
                 }
+                void confirmAction('放弃未保存的修改？', '文档有未保存的修改，确定关闭吗？', '放弃修改').then(confirmed => {
+                  if (confirmed) onClose();
+                });
               }}
             >
               <X size={16} />

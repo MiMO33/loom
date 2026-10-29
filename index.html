@@ -5,6 +5,16 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#faf9f5" />
     <title>Loom · Agent 任务看板</title>
+    <script>
+      (function () {
+        try {
+          var theme = localStorage.getItem('loom.theme');
+          if (theme === 'light' || theme === 'dark') document.documentElement.dataset.theme = theme;
+          var size = parseInt(localStorage.getItem('loom.textSize') || '100', 10);
+          if (size >= 100) document.documentElement.style.setProperty('--zoom', String(size / 100));
+        } catch (e) {}
+      })();
+    </script>
   </head>
   <body><div id="root"></div><script type="module" src="/src/main.tsx"></script></body>
 </html>

@@ -138,21 +138,11 @@ func Review(task *Task) (*GitReview, error) {
 	slices.Sort(files)
 	slices.Sort(excluded)
 
-	var overlap []string
-	for p, oldHash := range dirty {
-		if curHash, ok := current.Dirty[p]; ok && curHash != oldHash {
-			overlap = append(overlap, p)
-		}
-	}
-	slices.Sort(overlap)
-
 	var blocked string
 	if current.Branch != branch {
 		blocked = "项目分支已切换，请先恢复任务开始时的分支：" + branch
 	} else if current.Branch == "" {
 		blocked = "当前为 detached HEAD，请先在项目中检出任务分支。"
-	} else if len(overlap) > 0 {
-		blocked = "以下文件同时包含运行前的改动和本次改动，请先在外部核对并提交：" + strings.Join(overlap, "、")
 	}
 
 	var trackedDiff string
@@ -220,6 +210,73 @@ func commitURL(remote, commit string) string {
 	return ""
 }
 
+func findTaskCommit(root string, baselineHead string, taskID string, automatic bool) *GitResult {
+	args := []string{"log", "-n", "1", "--format=%H%x00%B"}
+	if taskID != "" {
+		args = append(args, "--fixed-strings", "--grep="+taskID)
+	}
+	if baselineHead != "" {
+		args = append(args, baselineHead+"..HEAD")
+	}
+	out, err := Git(root, args...)
+	if err != nil || out == "" {
+		return nil
+	}
+	parts := strings.SplitN(out, "\x00", 2)
+	hash := strings.TrimSpace(parts[0])
+	if hash == "" {
+		return nil
+	}
+	msg := ""
+	if len(parts) > 1 {
+		msg = strings.TrimSpace(parts[1])
+	}
+	if strings.Contains(msg, "Commit-Mode: automatic") {
+		automatic = true
+	} else if strings.Contains(msg, "Commit-Mode: manual") {
+		automatic = false
+	}
+	remote, _ := Git(root, "remote", "get-url", "origin")
+	return &GitResult{
+		Status:    "committed",
+		Automatic: automatic,
+		Hash:      hash,
+		Message:   msg,
+		URL:       commitURL(remote, hash),
+	}
+}
+
+func DetectTaskGitResult(task *Task, automatic bool) (*GitResult, error) {
+	info, err := Review(task)
+	if err != nil {
+		return nil, err
+	}
+	if !info.Available {
+		return &GitResult{Status: "unavailable", Automatic: automatic, Message: "工作目录未使用 Git"}, nil
+	}
+	baseHead := ""
+	if task.Baseline != nil {
+		baseHead = task.Baseline.Head
+	}
+	if res := findTaskCommit(info.Root, baseHead, task.ID, automatic); res != nil {
+		return res, nil
+	}
+	if info.Head != "" && baseHead != "" && info.Head != baseHead {
+		msg, err := Git(info.Root, "show", "-s", "--format=%B", info.Head)
+		if err == nil {
+			remote, _ := Git(info.Root, "remote", "get-url", "origin")
+			return &GitResult{
+				Status:    "committed",
+				Automatic: automatic,
+				Hash:      info.Head,
+				Message:   strings.TrimSpace(msg),
+				URL:       commitURL(remote, info.Head),
+			}, nil
+		}
+	}
+	return &GitResult{Status: "unchanged", Automatic: automatic, Message: "Agent 已自行管理提交或无新改动"}, nil
+}
+
 func CommitTask(task *Task, expectedToken, messagePath string) (*GitResult, error) {
 	info, err := Review(task)
 	if err != nil {
@@ -236,21 +293,8 @@ func CommitTask(task *Task, expectedToken, messagePath string) (*GitResult, erro
 		return nil, Fail("diff 已更新，请重新查看后确认。", http.StatusConflict)
 	}
 
-	if len(info.Files) == 0 {
-		if info.Head != "" && (task.Baseline == nil || info.Head != task.Baseline.Head) {
-			lastMsg, err := Git(info.Root, "show", "-s", "--format=%B", info.Head)
-			if err == nil && (strings.Contains(lastMsg, "Agent-Kanban-Task: "+task.ID) || strings.Contains(lastMsg, "Loom-Task: "+task.ID)) {
-				remote, _ := Git(info.Root, "remote", "get-url", "origin")
-				return &GitResult{
-					Status:    "committed",
-					Automatic: strings.Contains(lastMsg, "Commit-Mode: automatic"),
-					Hash:      info.Head,
-					Message:   lastMsg,
-					URL:       commitURL(remote, info.Head),
-				}, nil
-			}
-		}
-		return &GitResult{Status: "unchanged", Automatic: automatic, Message: "没有需要提交的文件"}, nil
+	if automatic || len(info.Files) == 0 {
+		return DetectTaskGitResult(task, automatic)
 	}
 
 	root := info.Root

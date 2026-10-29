@@ -31,6 +31,7 @@ type Database struct {
 	Revision       int      `json:"revision"`
 	LastProjectDir string   `json:"lastProjectDir,omitempty"`
 	ProjectDirs    []string `json:"projectDirs,omitempty"`
+	Settings       Settings `json:"settings,omitempty"`
 	Tasks          []*Task  `json:"tasks"`
 }
 
@@ -98,6 +99,7 @@ func NewStore(root string) (*Store, error) {
 		if s.Data.ProjectDirs == nil {
 			s.Data.ProjectDirs = []string{}
 		}
+		s.Data.Settings = s.Data.Settings.Normalized()
 		cleanDirs := []string{}
 		for _, dir := range s.Data.ProjectDirs {
 			dir = strings.TrimSpace(dir)
@@ -126,6 +128,13 @@ func NewStore(root string) (*Store, error) {
 		}
 		healed := false
 		for _, t := range s.Data.Tasks {
+			if t.Status == StatusWaiting && (strings.Contains(t.Error, "同时包含运行前的改动和本次改动") || strings.Contains(t.Error, "同一仓库还有未完成任务")) {
+				t.Error = ""
+				if t.Git != nil && t.Git.Status == "error" {
+					t.Git = nil
+				}
+				healed = true
+			}
 			if t.ProjectDir != "" {
 				expanded := Expand(strings.TrimSpace(t.ProjectDir))
 				if inside(root, expanded) {
@@ -190,7 +199,7 @@ func NewStore(root string) (*Store, error) {
 			s.Save()
 		}
 	} else if errors.Is(err, os.ErrNotExist) {
-		s.Data = Database{Version: 1, Revision: 0, ProjectDirs: []string{}, Tasks: []*Task{}}
+		s.Data = Database{Version: 1, Revision: 0, ProjectDirs: []string{}, Settings: (Settings{}).Normalized(), Tasks: []*Task{}}
 		s.Save()
 	} else {
 		return nil, err

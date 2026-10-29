@@ -616,7 +616,21 @@ const TOGGLE_HEADING_LABELS: Record<ToggleHeadingVariant, string> = {
   'heading-5': '折叠标题 5',
 };
 
-export function createRichMarkdownExtensions(placeholderText = '输入 Markdown 内容，或输入 / 插入块…'): AnyExtension[] {
+const RichMarkdownImage = Image.extend({
+  renderHTML({ HTMLAttributes }) {
+    const resolveImageSrc = (
+      this.options as { resolveImageSrc?: (src: string) => string }
+    ).resolveImageSrc;
+    const rawSrc = typeof HTMLAttributes.src === 'string' ? HTMLAttributes.src : '';
+    const src = rawSrc && resolveImageSrc ? resolveImageSrc(rawSrc) : HTMLAttributes.src;
+    return ['img', { ...this.options.HTMLAttributes, ...HTMLAttributes, ...(src ? { src } : {}) }];
+  },
+});
+
+export function createRichMarkdownExtensions(
+  placeholderText = '输入 Markdown 内容，或输入 / 插入块…',
+  resolveImageSrc?: (src: string) => string,
+): AnyExtension[] {
   return [
     StarterKit.configure({
       link: false,
@@ -642,10 +656,11 @@ export function createRichMarkdownExtensions(placeholderText = '输入 Markdown 
       autolink: true,
       linkOnPaste: true,
     }),
-    Image.configure({
+    RichMarkdownImage.configure({
       inline: true,
       allowBase64: true,
-    }),
+      ...(resolveImageSrc ? { resolveImageSrc } : {}),
+    } as Record<string, unknown>),
     RichMarkdownOrderedList,
     RichMarkdownTaskList,
     TaskItem.configure({ nested: true }),

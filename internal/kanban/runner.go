@@ -548,6 +548,11 @@ func RunFixtureAgent(args []string) int {
 		cmd := exec.Command(self, "output", filepath.Join(cwd, "result.md"))
 		cmd.Env = os.Environ()
 		_ = cmd.Run()
+		if !strings.Contains(prompt, "[no-commit]") {
+			tid := os.Getenv("AGENT_KANBAN_TASK_ID")
+			_, _ = Git(cwd, "add", "--", "result.md")
+			_, _ = Git(cwd, "commit", "--only", "-qm", fmt.Sprintf("feat: fixture commit\n\nLoom-Task: %s", tid), "--", "result.md")
+		}
 	}
 
 	text := "执行完成，已检查结果。"

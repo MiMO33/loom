@@ -42,7 +42,7 @@ func Main(version string) {
 			return
 		case "serve", "web":
 			proc.UserPath()
-			if err := gui.RunServe(); err != nil {
+			if err := gui.RunServe(version); err != nil {
 				fmt.Fprintln(os.Stderr, err)
 				os.Exit(1)
 			}

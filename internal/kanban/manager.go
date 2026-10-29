@@ -351,7 +351,11 @@ func (m *Manager) Delete(task *Task) error {
 		m.mu.Unlock()
 		return Fail("任务正在启动或完成，请稍后再删除。", http.StatusConflict)
 	}
+	var pids []int
 	for _, s := range task.Sessions {
+		if s.PID > 0 {
+			pids = append(pids, s.PID)
+		}
 		if s.Status != SessionEnded {
 			_ = m.stopLocked(task, s)
 		}
@@ -368,6 +372,16 @@ func (m *Manager) Delete(task *Task) error {
 	archiveCopy := filepath.Join(m.Store.Root, "archive", task.ID+".md")
 	m.mu.Unlock()
 
+	for _, pid := range pids {
+		_ = syscall.Kill(-pid, syscall.SIGKILL)
+		_ = syscall.Kill(pid, syscall.SIGKILL)
+		for range 20 {
+			if err := syscall.Kill(pid, 0); err != nil && !errors.Is(err, syscall.EPERM) {
+				break
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
 	_ = os.RemoveAll(taskDir)
 	_ = os.Remove(archiveCopy)
 	return nil

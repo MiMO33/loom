@@ -549,23 +549,33 @@ func TestPRPushAndCreation(t *testing.T) {
 func TestOverlappingChangesAndStaleDiff(t *testing.T) {
 	e := setupTest(t, true)
 	_ = os.WriteFile(filepath.Join(e.project, "result.md"), []byte("pre-existing work\n"), 0o644)
-	task := e.createTask(DraftInput{OneShot: true})
-	if _, err := e.manager.Launch(task, "", "", ""); err != nil {
+	task1 := e.createTask(DraftInput{Title: "并发任务 A [write]", OneShot: true})
+	task2 := e.createTask(DraftInput{Title: "并发任务 B [write]", OneShot: true})
+	if _, err := e.manager.Launch(task1, "", "", ""); err != nil {
 		t.Fatal(err)
 	}
-	e.waitTask(task, StatusWaiting)
-	if !strings.Contains(task.Error, "运行前") {
-		t.Fatalf("expected overlap error, got %s", task.Error)
+	if _, err := e.manager.Launch(task2, "", "", ""); err != nil {
+		t.Fatal(err)
 	}
-	mustGit(t, e.project, "add", "--", "result.md")
-	mustGit(t, e.project, "commit", "-qm", "test: 外部核对重叠改动")
-	info, err := e.manager.GitReview(task)
+	e.waitTask(task1, StatusDone)
+	e.waitTask(task2, StatusDone)
+	if task1.Git == nil || task1.Git.Status != "committed" {
+		t.Fatalf("expected task1 to detect agent commit, got %+v", task1.Git)
+	}
+
+	manual := e.createTask(DraftInput{Title: "手动提交检测 [write] [no-commit]", OneShot: false})
+	if _, err := e.manager.Launch(manual, "", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	e.waitTask(manual, StatusWaiting)
+	info, err := e.manager.GitReview(manual)
 	if err != nil {
 		t.Fatal(err)
 	}
 	_ = os.WriteFile(filepath.Join(e.project, "app.txt"), []byte("late edits\n"), 0o644)
-	st, res := e.request("POST", "/tasks/"+task.ID+"/complete", map[string]any{
+	st, res := e.request("POST", "/tasks/"+manual.ID+"/complete", map[string]any{
 		"token":   info.Token,
+		"action":  "commit",
 		"message": "feat: task 确认",
 	})
 	if st != 409 || !strings.Contains(res["error"].(string), "diff 已更新") {
@@ -628,12 +638,12 @@ func TestMoveWaitingToDoneWithoutCodeChanges(t *testing.T) {
 	}
 	e.waitTask(dirtyTask, StatusWaiting)
 
-	st, res := e.request("POST", "/tasks/"+dirtyTask.ID+"/move", map[string]any{"status": "done"})
-	if st != 409 || !strings.Contains(res["error"].(string), "查看 diff") {
-		t.Fatalf("expected 409 for dirty waiting task move to done, got %d %v", st, res)
+	st, _ = e.request("POST", "/tasks/"+dirtyTask.ID+"/move", map[string]any{"status": "done"})
+	if st != 200 {
+		t.Fatalf("expected 200 for waiting task move to done (agent self-commits), got %d", st)
 	}
-	if dirtyTask.Status != StatusWaiting {
-		t.Fatalf("expected dirtyTask to remain waiting, got %s", dirtyTask.Status)
+	if dirtyTask.Status != StatusDone || dirtyTask.Git == nil || dirtyTask.Git.Status != "committed" {
+		t.Fatalf("expected dirtyTask to be done with agent commit, got status=%s git=%+v", dirtyTask.Status, dirtyTask.Git)
 	}
 }
 
@@ -666,3 +676,47 @@ func TestDoneTaskArchiveTagAndDelete(t *testing.T) {
 		t.Fatal("expected task directory to be deleted")
 	}
 }
+
+func TestSettingsAPIAndTaskDefaults(t *testing.T) {
+	e := setupTest(t, false)
+	st, getRes := e.request("GET", "/settings", nil)
+	if st != 200 {
+		t.Fatalf("expected 200 on GET /settings, got %d", st)
+	}
+	if getRes["theme"] != "system" || getRes["textSize"] != float64(100) || getRes["dock"] != "always" {
+		t.Fatalf("unexpected default settings: %v", getRes)
+	}
+
+	customArchive := filepath.Join(e.root, "custom-vault")
+	st, postRes := e.request("POST", "/settings", map[string]any{
+		"theme":              "dark",
+		"textSize":           125,
+		"dock":               "window",
+		"keepAwake":          true,
+		"keepAwakeDisplay":   true,
+		"sessionTerminal":    "com.googlecode.iterm2",
+		"defaultTool":        "codex",
+		"defaultOneShot":     false,
+		"defaultMode":        "tmux",
+		"defaultArchivePath": customArchive,
+	})
+	if st != 200 {
+		t.Fatalf("expected 200 on POST /settings, got %d: %v", st, postRes)
+	}
+	if postRes["theme"] != "dark" || postRes["textSize"] != float64(125) || postRes["defaultTool"] != "codex" || postRes["defaultMode"] != "tmux" {
+		t.Fatalf("unexpected updated settings: %v", postRes)
+	}
+
+	if badSt, _ := e.request("POST", "/settings", map[string]any{"theme": "invalid"}); badSt != 400 {
+		t.Fatalf("expected 400 for invalid theme, got %d", badSt)
+	}
+
+	st, created := e.request("POST", "/tasks", map[string]any{"title": "继承默认设置的任务"})
+	if st != 201 {
+		t.Fatalf("expected 201 creating task with settings defaults, got %d", st)
+	}
+	if created["tool"] != "codex" || created["mode"] != "tmux" || created["oneShot"] != false || created["archivePath"] != customArchive {
+		t.Fatalf("task did not inherit settings defaults: %v", created)
+	}
+}
+

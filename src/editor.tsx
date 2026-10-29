@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { FilePlus2, Folder, FolderOpen, ImagePlus, Play, X } from 'lucide-react';
-import type { Health, Mode, Task, TaskFile, Tool } from '../shared/types';
+import type { Health, Mode, Settings, Task, TaskFile, Tool } from '../shared/types';
 import { ALL_TOOLS, DEFAULT_ARCHIVE_PATH, toolLabels } from '../shared/types';
 import { api, chooseFolder, post, shortPath } from './api';
 import { ToolMark } from './components';
@@ -9,36 +9,39 @@ import { OrcaMarkdownEditor } from './markdown-editor/OrcaMarkdownEditor';
 interface Props {
   task?: Task;
   health?: Health;
+  settings?: Settings;
   wide?: boolean;
   defaultProjectDir?: string;
   projectDirs?: string[];
   onProjectsChange?: () => void;
   onSaved: (task: Task) => void;
-  notify: (text: string) => void;
 }
-interface PendingFile { id: string; file: File }
+interface PendingFile { id: string; file: File; previewUrl?: string }
 
 export function TaskEditor({
   task,
   health,
+  settings,
   wide = false,
   defaultProjectDir = '',
   projectDirs = [],
   onProjectsChange,
   onSaved,
-  notify,
 }: Props) {
+  const defaultOneShot = task?.oneShot ?? settings?.defaultOneShot ?? true;
   const [draft, setDraft] = useState({
     title: task?.title || '',
     description: task?.description || '',
-    tool: (task?.tool || 'claude') as Tool,
-    mode: (task?.mode || 'headless') as Mode,
-    oneShot: task?.oneShot ?? true,
+    tool: (task?.tool || settings?.defaultTool || 'claude') as Tool,
+    mode: (task?.mode || (defaultOneShot ? 'headless' : settings?.defaultMode) || 'headless') as Mode,
+    oneShot: defaultOneShot,
     projectDir: task?.projectDir || defaultProjectDir || projectDirs[0] || '',
-    archivePath: task?.archivePath || DEFAULT_ARCHIVE_PATH,
+    archivePath: task?.archivePath || settings?.defaultArchivePath || DEFAULT_ARCHIVE_PATH,
   });
   const [saved, setSaved] = useState(task);
   const [pending, setPending] = useState<PendingFile[]>([]);
+  const pendingRef = useRef<PendingFile[]>([]);
+  pendingRef.current = pending;
   const [existing, setExisting] = useState(task?.input || []);
   const [recentDirs, setRecentDirs] = useState<string[]>(projectDirs);
   const [busy, setBusy] = useState(false);
@@ -47,6 +50,14 @@ export function TaskEditor({
   const fileInput = useRef<HTMLInputElement>(null);
   const archiveOnly = task?.status === 'done';
   const patch = (value: Partial<typeof draft>) => setDraft(current => ({ ...current, ...value }));
+
+  useEffect(() => {
+    return () => {
+      pendingRef.current.forEach(item => {
+        if (item.previewUrl) URL.revokeObjectURL(item.previewUrl);
+      });
+    };
+  }, []);
 
   useEffect(() => {
     setRecentDirs(projectDirs);
@@ -100,13 +111,28 @@ export function TaskEditor({
     }
   }
 
+  function resolveImageSrc(src: string): string {
+    if (src.startsWith('attachment:')) {
+      const id = src.slice('attachment:'.length);
+      const found = pendingRef.current.find(item => item.id === id);
+      if (found?.previewUrl) return found.previewUrl;
+    }
+    return src;
+  }
+
   function stage(files: File[], embed = false) {
-    const incoming = files.map(file => ({ file, id: crypto.randomUUID() }));
     if (files.some(file => file.size > 20 * 1024 * 1024)) {
       setError('每个文件不超过 20 MB。');
       return;
     }
-    setPending(current => [...current, ...incoming]);
+    const incoming: PendingFile[] = files.map(file => ({
+      file,
+      id: crypto.randomUUID(),
+      previewUrl: file.type.startsWith('image/') ? URL.createObjectURL(file) : undefined,
+    }));
+    const nextPending = [...pendingRef.current, ...incoming];
+    pendingRef.current = nextPending;
+    setPending(nextPending);
     if (embed) {
       setDraft(current => ({
         ...current,
@@ -151,7 +177,9 @@ export function TaskEditor({
             `attachment:${item.id}`,
             `/api/tasks/${result.id}/files/${uploaded[index].id}`,
           );
+          if (item.previewUrl) URL.revokeObjectURL(item.previewUrl);
         });
+        pendingRef.current = [];
         setPending([]);
         setExisting(current => [...current, ...uploaded]);
         patch({ description });
@@ -166,7 +194,6 @@ export function TaskEditor({
         result = { ...result, status: 'doing' };
       }
       onSaved(result);
-      notify(run ? '任务已启动' : '任务已保存');
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -292,9 +319,6 @@ export function TaskEditor({
                 ))}
               </div>
             )}
-            <small className="field-hint">
-              自动选择上次选择的项目目录；Agent 将在项目目录执行。
-            </small>
           </div>
         </>
       )}
@@ -322,7 +346,6 @@ export function TaskEditor({
             选择…
           </button>
         </div>
-        <small className="field-hint">默认保存到 /tmp，可按任务修改。</small>
       </label>
 
       {!archiveOnly && (
@@ -391,9 +414,12 @@ export function TaskEditor({
                     className="icon-button"
                     aria-label={`移除 ${item.file.name}`}
                     onClick={() => {
-                      setPending(current => current.filter(file => file.id !== item.id));
+                      if (item.previewUrl) URL.revokeObjectURL(item.previewUrl);
+                      const nextPending = pendingRef.current.filter(file => file.id !== item.id);
+                      pendingRef.current = nextPending;
+                      setPending(nextPending);
                       patch({
-                        description: draft.description.replace(
+                        description: draft.description.replaceAll(
                           `![${item.file.name}](attachment:${item.id})`,
                           '',
                         ),
@@ -441,10 +467,11 @@ export function TaskEditor({
               <OrcaMarkdownEditor
                 value={draft.description}
                 onChange={description => patch({ description })}
-                placeholder="在这里详细撰写任务背景、技术方案、约束与验收标准… 输入 / 插入标题、表格、代码块、公式或清单，可直接粘贴图片。"
+                placeholder="输入任务需求，输入 / 插入块，可直接粘贴图片…"
                 disabled={busy}
                 onSave={() => void save(false)}
                 onPasteOrDropFiles={files => stage(files, true)}
+                resolveImageSrc={resolveImageSrc}
               />
             </div>
           </div>
@@ -461,7 +488,7 @@ export function TaskEditor({
                 <input
                   autoFocus={!task}
                   maxLength={200}
-                  placeholder="这次要完成什么？"
+                  placeholder="输入任务标题…"
                   value={draft.title}
                   onChange={event => patch({ title: event.target.value })}
                   disabled={busy}
@@ -470,15 +497,15 @@ export function TaskEditor({
               <div className="field description-field">
                 <div className="field-heading">
                   <label>详细需求</label>
-                  <small className="muted">支持 / 斜杠命令、表格、待办清单、代码高亮与 ⌘K 链接</small>
                 </div>
                 <OrcaMarkdownEditor
                   value={draft.description}
                   onChange={description => patch({ description })}
-                  placeholder="描述目标、约束和完成标准。输入 / 插入标题、表格、代码块或清单，可粘贴或拖入图片…"
+                  placeholder="输入任务需求，输入 / 插入块，可直接粘贴图片…"
                   disabled={busy}
                   onSave={() => void save(false)}
                   onPasteOrDropFiles={files => stage(files, true)}
+                  resolveImageSrc={resolveImageSrc}
                 />
               </div>
             </>
@@ -489,11 +516,7 @@ export function TaskEditor({
 
       <div className="editor-footer">
         <span className="muted">
-          {busy
-            ? '正在保存…'
-            : saved
-              ? '修改会保存到本机 · ⌘S 快速保存'
-              : '支持长时间沉浸书写 · 粘贴的图片将自动作为输入附件注入路径'}
+          {busy ? '正在保存…' : saved ? '⌘S 快速保存' : ''}
         </span>
         <button type="submit" className="button" disabled={busy}>
           {saved ? '保存修改' : '放入 todo'}

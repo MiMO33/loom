@@ -832,6 +832,21 @@ h1 { font-family: Georgia, "Songti SC", "STSong", serif; font-size: 16.5px; font
   color: var(--muted);
 }
 
+.magpie-row .sub .warn {
+  color: #b84a39;
+  font-weight: 500;
+}
+
+:root[data-theme="dark"] .magpie-row .sub .warn {
+  color: #e38768;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .magpie-row .sub .warn {
+    color: #e38768;
+  }
+}
+
 .magpie-segs {
   position: relative;
   display: inline-flex;

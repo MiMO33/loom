@@ -82,11 +82,61 @@ export interface Task {
   error?: string;
 }
 
+export interface TerminalChoice {
+  id: string;
+  name: string;
+  path?: string;
+}
+
+export interface Settings {
+  theme?: 'system' | 'light' | 'dark';
+  textSize?: 100 | 110 | 125 | 150;
+  dock?: 'always' | 'window' | 'never';
+  keepAwake?: boolean;
+  keepAwakeDisplay?: boolean;
+  notifyTaskEnd?: boolean;
+  sessionTerminal?: string;
+  defaultTool?: Tool;
+  defaultMode?: Mode;
+  defaultOneShot?: boolean;
+  defaultArchivePath?: string;
+  executables?: Partial<Record<Tool, string>>;
+}
+
+export interface SettingsView extends Settings {
+  login: boolean;
+  notifyProblem?: 'denied' | 'unavailable';
+  version: string;
+  dataDir: string;
+  url: string;
+  terminalApps: TerminalChoice[];
+  terminalDefault: string;
+}
+
+export interface CLIShell {
+  name: string;
+  default?: boolean;
+  known: boolean;
+  command?: string;
+  ours: boolean;
+  profile?: string;
+  hasDir?: boolean;
+}
+
+export interface CLIStatus {
+  exe: string;
+  command?: string;
+  ours: boolean;
+  dir?: string;
+  shells: CLIShell[];
+}
+
 export interface Board {
   tasks: Task[];
   revision: number;
   lastProjectDir?: string;
   projectDirs?: string[];
+  settings?: Settings;
 }
 
 export interface ToolHealth { available: boolean; version: string }

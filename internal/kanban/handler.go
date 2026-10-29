@@ -23,6 +23,8 @@ type DesktopBridge interface {
 	OpenFolder(path string) error
 	OpenURL(url string) error
 	Copy(text string) bool
+	ApplySettings(s Settings)
+	NotifyProblem() string
 }
 
 type ownWindowKey struct{}
@@ -97,6 +99,7 @@ func NewAPIHandler(manager *Manager, desktop DesktopBridge) http.Handler {
 			Revision:       manager.Store.Data.Revision,
 			LastProjectDir: manager.Store.Data.LastProjectDir,
 			ProjectDirs:    manager.Store.Data.ProjectDirs,
+			Settings:       manager.Store.Data.Settings.Normalized(),
 		}
 		w.Header().Set("Cache-Control", "no-store")
 		writeJSON(w, http.StatusOK, board)
@@ -168,12 +171,18 @@ func NewAPIHandler(manager *Manager, desktop DesktopBridge) http.Handler {
 			tools := make(map[string]ToolHealth, len(names))
 			var wg sync.WaitGroup
 			var mu sync.Mutex
+			manager.Lock()
+			customExecs := make(map[Tool]string, len(ValidTools))
+			for _, t := range ValidTools {
+				customExecs[t] = manager.ExecutableFor(t)
+			}
+			manager.Unlock()
 			for _, name := range names {
 				wg.Add(1)
 				go func(n string) {
 					defer wg.Done()
 					cmd := n
-					if custom := manager.Options.Executables[Tool(n)]; custom != "" {
+					if custom := customExecs[Tool(n)]; custom != "" {
 						cmd = custom
 					}
 					th := CheckToolHealth(cmd)
@@ -196,7 +205,194 @@ func NewAPIHandler(manager *Manager, desktop DesktopBridge) http.Handler {
 		writeJSON(w, http.StatusOK, h)
 	})
 
+	buildSettingsView := func() SettingsView {
+		manager.Lock()
+		s := manager.Store.Data.Settings.Normalized()
+		manager.Unlock()
+		apps, defTerm := DiscoverTerminalApps()
+		ver := manager.Options.Version
+		if ver == "" {
+			ver = "dev"
+		}
+		var notifyProblem string
+		if desktop != nil && s.NotifyTaskEnd != nil && *s.NotifyTaskEnd {
+			notifyProblem = desktop.NotifyProblem()
+		}
+		return SettingsView{
+			Settings:        s,
+			Login:           IsLoginEnabled(),
+			NotifyProblem:   notifyProblem,
+			Version:         ver,
+			DataDir:         tildePath(manager.Options.DataDir),
+			URL:             manager.Options.URL,
+			TerminalApps:    apps,
+			TerminalDefault: defTerm,
+		}
+	}
+
+	mux.HandleFunc("GET /api/settings", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		writeJSON(w, http.StatusOK, buildSettingsView())
+	})
+
+	mux.HandleFunc("POST /api/settings", func(w http.ResponseWriter, r *http.Request) {
+		manager.Lock()
+		cur := manager.Store.Data.Settings.Normalized()
+		manager.Unlock()
+
+		var raw map[string]json.RawMessage
+		if err := decodeBody(r, &raw); err != nil {
+			writeErr(w, err)
+			return
+		}
+		next := cur
+		if v, ok := raw["theme"]; ok {
+			if err := json.Unmarshal(v, &next.Theme); err != nil {
+				writeErr(w, Fail("外观设置格式无效", http.StatusBadRequest))
+				return
+			}
+		}
+		if v, ok := raw["textSize"]; ok {
+			if err := json.Unmarshal(v, &next.TextSize); err != nil {
+				writeErr(w, Fail("文字大小格式无效", http.StatusBadRequest))
+				return
+			}
+		}
+		if v, ok := raw["dock"]; ok {
+			if err := json.Unmarshal(v, &next.Dock); err != nil {
+				writeErr(w, Fail("Dock 设置格式无效", http.StatusBadRequest))
+				return
+			}
+		}
+		if v, ok := raw["keepAwake"]; ok {
+			if err := json.Unmarshal(v, &next.KeepAwake); err != nil {
+				writeErr(w, Fail("防休眠设置格式无效", http.StatusBadRequest))
+				return
+			}
+		}
+		if v, ok := raw["keepAwakeDisplay"]; ok {
+			if err := json.Unmarshal(v, &next.KeepAwakeDisplay); err != nil {
+				writeErr(w, Fail("防休眠设置格式无效", http.StatusBadRequest))
+				return
+			}
+		}
+		if v, ok := raw["notifyTaskEnd"]; ok {
+			var b bool
+			if err := json.Unmarshal(v, &b); err != nil {
+				writeErr(w, Fail("通知设置格式无效", http.StatusBadRequest))
+				return
+			}
+			next.NotifyTaskEnd = &b
+		}
+		if v, ok := raw["sessionTerminal"]; ok {
+			if err := json.Unmarshal(v, &next.SessionTerminal); err != nil {
+				writeErr(w, Fail("终端设置格式无效", http.StatusBadRequest))
+				return
+			}
+		}
+		if v, ok := raw["defaultTool"]; ok {
+			if err := json.Unmarshal(v, &next.DefaultTool); err != nil {
+				writeErr(w, Fail("默认工具设置格式无效", http.StatusBadRequest))
+				return
+			}
+		}
+		if v, ok := raw["defaultMode"]; ok {
+			if err := json.Unmarshal(v, &next.DefaultMode); err != nil {
+				writeErr(w, Fail("默认模式设置格式无效", http.StatusBadRequest))
+				return
+			}
+		}
+		if v, ok := raw["defaultOneShot"]; ok {
+			var b bool
+			if err := json.Unmarshal(v, &b); err != nil {
+				writeErr(w, Fail("默认一次性任务设置格式无效", http.StatusBadRequest))
+				return
+			}
+			next.DefaultOneShot = &b
+			if b {
+				next.DefaultMode = ModeHeadless
+			}
+		}
+		if v, ok := raw["defaultArchivePath"]; ok {
+			if err := json.Unmarshal(v, &next.DefaultArchivePath); err != nil {
+				writeErr(w, Fail("默认归档目录设置格式无效", http.StatusBadRequest))
+				return
+			}
+		}
+		execChanged := false
+		if v, ok := raw["executables"]; ok {
+			var m map[Tool]string
+			if err := json.Unmarshal(v, &m); err != nil {
+				writeErr(w, Fail("可执行文件路径设置格式无效", http.StatusBadRequest))
+				return
+			}
+			next.Executables = m
+			execChanged = true
+		}
+
+		validated, err := ValidateSettings(next)
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+
+		manager.Lock()
+		manager.Store.Data.Settings = validated
+		manager.Store.Save()
+		manager.syncAwakeLocked()
+		manager.Unlock()
+
+		if execChanged {
+			healthMu.Lock()
+			cachedHealth = nil
+			healthMu.Unlock()
+		}
+		if desktop != nil {
+			desktop.ApplySettings(validated)
+		}
+		writeJSON(w, http.StatusOK, buildSettingsView())
+	})
+
+	mux.HandleFunc("POST /api/settings/login", func(w http.ResponseWriter, r *http.Request) {
+		var in struct {
+			On bool `json:"on"`
+		}
+		if err := decodeBody(r, &in); err != nil {
+			writeErr(w, err)
+			return
+		}
+		if err := SetLoginEnabled(in.On); err != nil {
+			writeErr(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, buildSettingsView())
+	})
+
+	mux.HandleFunc("GET /api/cli", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		writeJSON(w, http.StatusOK, ReadCLIStatus())
+	})
+
+	mux.HandleFunc("POST /api/cli", func(w http.ResponseWriter, r *http.Request) {
+		var in struct {
+			Shell string `json:"shell"`
+		}
+		if err := decodeBody(r, &in); err != nil {
+			writeErr(w, err)
+			return
+		}
+		st, err := InstallCLI(strings.TrimSpace(in.Shell))
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, st)
+	})
+
 	mux.HandleFunc("POST /api/tasks", func(w http.ResponseWriter, r *http.Request) {
+		manager.Lock()
+		defSettings := manager.Store.Data.Settings.Normalized()
+		manager.Unlock()
 		in := struct {
 			Title       string `json:"title"`
 			Description string `json:"description"`
@@ -206,9 +402,10 @@ func NewAPIHandler(manager *Manager, desktop DesktopBridge) http.Handler {
 			ProjectDir  string `json:"projectDir"`
 			ArchivePath string `json:"archivePath"`
 		}{
-			Tool:        ToolClaude,
-			Mode:        ModeHeadless,
-			ArchivePath: DefaultArchivePath,
+			Tool:        defSettings.DefaultTool,
+			Mode:        defSettings.DefaultMode,
+			OneShot:     defSettings.DefaultOneShot,
+			ArchivePath: defSettings.DefaultArchivePath,
 		}
 		if err := decodeBody(r, &in); err != nil {
 			writeErr(w, err)
@@ -603,26 +800,13 @@ func NewAPIHandler(manager *Manager, desktop DesktopBridge) http.Handler {
 				}
 			}
 		case in.Status == StatusDone && task.Status == StatusWaiting:
-			rev, err := manager.GitReview(task)
-			if err != nil {
-				writeErr(w, err)
-				return
-			}
-			if rev.Blocked != "" {
-				writeErr(w, Fail(rev.Blocked, http.StatusConflict))
-				return
-			}
-			if rev.Available && len(rev.Files) > 0 {
-				writeErr(w, Fail("请在详情中查看 diff，然后确认完成。", http.StatusConflict))
-				return
-			}
 			msg := fmt.Sprintf("feat: task %s\n\n- 完成任务 %s 的改动。", task.Title, task.ID)
-			if err := manager.Finish(task, false, "commit", msg, rev.Token); err != nil {
+			if err := manager.Finish(task, false, "none", msg, ""); err != nil {
 				writeErr(w, err)
 				return
 			}
 		case in.Status == StatusDone:
-			writeErr(w, Fail("请在详情中查看 diff，然后确认完成。", http.StatusConflict))
+			writeErr(w, Fail("任务尚未等待确认。", http.StatusConflict))
 			return
 		default:
 			writeErr(w, Fail("当前 session 状态不允许移动到此列。", http.StatusConflict))
@@ -787,6 +971,14 @@ func NewAPIHandler(manager *Manager, desktop DesktopBridge) http.Handler {
 			return
 		}
 		in.Message = strings.TrimSpace(in.Message)
+		if in.Action == "none" {
+			if err := manager.Finish(task, false, "none", in.Message, in.Token); err != nil {
+				writeErr(w, err)
+				return
+			}
+			writeJSON(w, http.StatusOK, task)
+			return
+		}
 		if in.Token == "" || in.Message == "" || (in.Action != "commit" && in.Action != "pr") {
 			writeErr(w, Fail("提交参数无效", http.StatusBadRequest))
 			return

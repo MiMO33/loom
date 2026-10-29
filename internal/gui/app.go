@@ -4,6 +4,7 @@ package gui
 
 import (
 	"embed"
+	"encoding/json"
 	"fmt"
 	"io/fs"
 	"log"
@@ -42,13 +43,14 @@ func appIconFor() []byte {
 }
 
 type host struct {
-	app     *application.App
-	main    *application.WebviewWindow
-	tray    *application.SystemTray
-	manager *kanban.Manager
-	closing atomic.Bool
-	ready   chan struct{}
-	once    sync.Once
+	app      *application.App
+	main     *application.WebviewWindow
+	tray     *application.SystemTray
+	manager  *kanban.Manager
+	notifier *notifier
+	closing  atomic.Bool
+	ready    chan struct{}
+	once     sync.Once
 }
 
 func (h *host) whenReady(fn func()) {
@@ -62,11 +64,22 @@ func (h *host) ShowMain() {
 	application.InvokeSync(func() { h.openMain() })
 }
 
+func (h *host) ShowTask(taskID string) {
+	application.InvokeSync(func() {
+		h.openMain()
+		if h.main != nil && taskID != "" {
+			b, _ := json.Marshal(taskID)
+			h.main.ExecJS(fmt.Sprintf("window.dispatchEvent(new CustomEvent('loom:open-task', { detail: %s }))", string(b)))
+		}
+	})
+}
+
 func (h *host) openMain() {
 	h.closing.Store(false)
 	if h.main == nil {
 		return
 	}
+	h.syncDock(true)
 	showHere(h.main)
 }
 
@@ -85,6 +98,40 @@ func (h *host) hideMain() {
 			h.main.Hide()
 		}
 	})
+	h.syncDock(false)
+}
+
+func (h *host) syncDock(shown bool) {
+	if h.manager == nil {
+		return
+	}
+	h.manager.Lock()
+	dockMode := h.manager.Store.Data.Settings.Normalized().Dock
+	h.manager.Unlock()
+	full := application.InvokeSyncWithResult(func() bool {
+		return h.main != nil && h.main.IsFullscreen()
+	})
+	inDock := dockMode == "always" || (dockMode == "window" && shown) || full
+	setDockVisible(inDock, shown)
+}
+
+func (h *host) ApplySettings(s kanban.Settings) {
+	s = s.Normalized()
+	setWindowZoom(h.main, s.TextSize)
+	shown := application.InvokeSyncWithResult(func() bool {
+		return h.main != nil && windowOpen(h.main)
+	})
+	h.syncDock(shown)
+	if h.notifier != nil && s.NotifyTaskEnd != nil && *s.NotifyTaskEnd {
+		go h.notifier.allowed()
+	}
+}
+
+func (h *host) NotifyProblem() string {
+	if h.notifier == nil {
+		return ""
+	}
+	return h.notifier.problem()
 }
 
 func (h *host) leaveFullscreenThenHide() {
@@ -223,6 +270,7 @@ func Run(version string, showMain bool) error {
 		AppRoot: cwd,
 		DataDir: dataDir,
 		URL:     baseURL,
+		Version: version,
 	})
 	if err != nil {
 		_ = ln.Close()
@@ -233,6 +281,13 @@ func Run(version string, showMain bool) error {
 		manager: manager,
 		ready:   make(chan struct{}),
 	}
+	h.notifier = &notifier{h: h}
+	manager.OnTaskEnd = func(ev kanban.TaskNotifyEvent) {
+		h.whenReady(func() {
+			h.notifier.sendTaskEnd(ev)
+		})
+	}
+
 	handler := CombinedHandler(kanban.NewAPIHandler(manager, h))
 	httpSrv := &http.Server{Handler: handler}
 	go func() {
@@ -267,6 +322,12 @@ func Run(version string, showMain bool) error {
 
 	menu := h.app.NewMenu()
 	menu.Add("打开 Loom").OnClick(func(*application.Context) { h.ShowMain() })
+	menu.Add("设置…").OnClick(func(*application.Context) {
+		h.ShowMain()
+		if h.main != nil {
+			h.main.ExecJS("window.dispatchEvent(new CustomEvent('loom:open-settings'))")
+		}
+	})
 	statusItem := menu.Add("状态：空闲").SetEnabled(false)
 	menu.AddSeparator()
 	menu.Add("版本 " + version).SetEnabled(false)
@@ -314,7 +375,15 @@ func Run(version string, showMain bool) error {
 
 	h.app.Event.OnApplicationEvent(events.Common.ApplicationStarted, func(*application.ApplicationEvent) {
 		plainTitlebar(h.main)
+		manager.Lock()
+		initSettings := manager.Store.Data.Settings.Normalized()
+		manager.Unlock()
+		setWindowZoom(h.main, initSettings.TextSize)
+		h.syncDock(showMain)
 		h.once.Do(func() { close(h.ready) })
+		if initSettings.NotifyTaskEnd != nil && *initSettings.NotifyTaskEnd {
+			go h.notifier.allowed()
+		}
 	})
 
 	if showMain {
@@ -325,7 +394,7 @@ func Run(version string, showMain bool) error {
 }
 
 // RunServe runs only the loopback HTTP server in the foreground (for headless/CLI server mode).
-func RunServe() error {
+func RunServe(version string) error {
 	dataDir := kanban.DefaultDataDir()
 	ln, port, err := listenLoopback()
 	if err != nil {
@@ -337,6 +406,7 @@ func RunServe() error {
 		AppRoot: cwd,
 		DataDir: dataDir,
 		URL:     baseURL,
+		Version: version,
 	})
 	if err != nil {
 		_ = ln.Close()

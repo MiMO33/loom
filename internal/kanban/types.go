@@ -30,6 +30,35 @@ const (
 
 var ValidTools = []Tool{ToolClaude, ToolCodex, ToolPi, ToolGemini, ToolOpenCode, ToolCursor}
 
+func ToolDisplayName(t Tool) string {
+	switch t {
+	case ToolClaude:
+		return "Claude Code"
+	case ToolCodex:
+		return "Codex"
+	case ToolPi:
+		return "Pi"
+	case ToolGemini:
+		return "Gemini CLI"
+	case ToolOpenCode:
+		return "OpenCode"
+	case ToolCursor:
+		return "Cursor Agent"
+	default:
+		return string(t)
+	}
+}
+
+type TaskNotifyEvent struct {
+	TaskID     string
+	Title      string
+	Status     TaskStatus
+	Tool       Tool
+	ProjectDir string
+	ActiveMs   int64
+	Error      string
+}
+
 type TaskFile struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
@@ -123,6 +152,7 @@ type Board struct {
 	Revision       int      `json:"revision"`
 	LastProjectDir string   `json:"lastProjectDir"`
 	ProjectDirs    []string `json:"projectDirs"`
+	Settings       Settings `json:"settings"`
 }
 
 type ToolHealth struct {

@@ -38,6 +38,7 @@ app: build
 	@cp loom loom.app/Contents/MacOS/loom
 	@cp build/darwin/loom.icns loom.app/Contents/Resources/loom.icns
 	@sed 's/@VERSION@/$(VERSION)/' build/darwin/Info.plist > loom.app/Contents/Info.plist
+	@codesign --force --deep --sign - loom.app 2>/dev/null || true
 	@echo "  loom.app"
 
 test: ui internal/gui/tray.png

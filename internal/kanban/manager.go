@@ -26,6 +26,7 @@ type ManagerOptions struct {
 	AppRoot     string
 	DataDir     string
 	URL         string
+	Version     string
 	Executables Executables
 }
 
@@ -77,15 +78,18 @@ func Tail(path string, limit int64) string {
 }
 
 type Manager struct {
-	Options    ManagerOptions
-	Store      *Store
-	mu         sync.Mutex
-	ticking    bool
-	completing map[string]bool
-	launching  map[string]bool
-	repoLocks  map[string]bool
-	stopCh     chan struct{}
-	stopOnce   sync.Once
+	Options     ManagerOptions
+	Store       *Store
+	OnTaskEnd   func(TaskNotifyEvent)
+	mu          sync.Mutex
+	ticking     bool
+	completing  map[string]bool
+	launching   map[string]bool
+	repoLocks   map[string]bool
+	awakeMode   int
+	awakeCancel func()
+	stopCh      chan struct{}
+	stopOnce    sync.Once
 }
 
 func NewManager(opts ManagerOptions) (*Manager, error) {
@@ -126,6 +130,13 @@ func (m *Manager) Close() {
 	m.stopOnce.Do(func() {
 		close(m.stopCh)
 	})
+	m.mu.Lock()
+	if m.awakeCancel != nil {
+		m.awakeCancel()
+		m.awakeCancel = nil
+		m.awakeMode = 0
+	}
+	m.mu.Unlock()
 }
 
 func (m *Manager) RunDir(task *Task, session *Session) string {
@@ -188,7 +199,11 @@ func (m *Manager) createLocked(in DraftInput) (*Task, error) {
 	}
 	archivePath := strings.TrimSpace(in.ArchivePath)
 	if archivePath == "" {
-		archivePath = DefaultArchivePath
+		if def := strings.TrimSpace(m.Store.Data.Settings.DefaultArchivePath); def != "" {
+			archivePath = def
+		} else {
+			archivePath = DefaultArchivePath
+		}
 	}
 	projectDir := strings.TrimSpace(in.ProjectDir)
 	if projectDir != "" {
@@ -397,10 +412,7 @@ func (m *Manager) prepareLocked(task *Task, tool Tool, mode Mode) (string, error
 		return "", Fail("项目目录不存在："+cwd, http.StatusBadRequest)
 	}
 	m.Store.RememberProjectDir(cwd)
-	exe := DefaultCommandForTool(tool)
-	if custom := m.Options.Executables[tool]; custom != "" {
-		exe = custom
-	}
+	exe := m.ExecutableFor(tool)
 	if !CheckToolHealth(exe).Available {
 		return "", Fail(string(tool)+" 无法执行，请检查安装和 PATH。", http.StatusBadRequest)
 	}
@@ -455,9 +467,9 @@ Session ID：%s
 创建产物后，用以下 CLI 回报每个实际存在的输出文件：
 %s
 回报环境变量已注入；勿把令牌写入回复。
-由看板在任务完成时统一提交 Git 和归档。执行过程中保留其他人的改动，不自行 commit / push / 创建 PR。
+若有代码或文件修改，请在任务完成前由你自行精确暂存并提交本任务修改的文件（如 git add -- <本任务修改的文件...> && git commit -m "..." -m "Loom-Task: %s"）。同一工作目录可能有其他 Agent 并行工作，严禁使用 git add . / git add -A，严禁触碰或回滚其他任务的未提交改动；不要自行 git push 或创建 PR。
 最终回复说明实际结果、验证情况、关键决策和遗留问题。`,
-		task.Title, desc, task.ID, session.ID, m.workingDir(task), inputSection, filepath.Join(taskDir, "output"), cliCmd)
+		task.Title, desc, task.ID, session.ID, m.workingDir(task), inputSection, filepath.Join(taskDir, "output"), cliCmd, task.ID)
 }
 
 func (m *Manager) Launch(task *Task, tool Tool, mode Mode, message string) (*Session, error) {
@@ -543,7 +555,7 @@ func (m *Manager) spawnLocked(task *Task, session *Session, prompt, cwd string) 
 		TaskDir:    taskDir,
 		RunDir:     dir,
 		AppRoot:    m.Options.AppRoot,
-		Executable: m.Options.Executables[session.Tool],
+		Executable: m.ExecutableFor(session.Tool),
 	})
 	spec := LaunchSpec{
 		Command:    cmdSpec.Command,
@@ -609,6 +621,7 @@ func (m *Manager) spawnLocked(task *Task, session *Session, prompt, cwd string) 
 	}
 
 	m.Store.Touch(task)
+	m.syncAwakeLocked()
 	return nil
 }
 
@@ -712,9 +725,13 @@ func (m *Manager) Attach(task *Task, session *Session, openTerminal bool) (*Atta
 	if openTerminal {
 		m.mu.Lock()
 		script := filepath.Join(m.RunDir(task, session), "attach.command")
+		termChoice := m.Store.Data.Settings.SessionTerminal
 		m.mu.Unlock()
 		_ = os.WriteFile(script, []byte("#!/bin/sh\nexec "+command+"\n"), 0o700)
-		if err := exec.Command("open", "-a", "Terminal", script).Run(); err == nil {
+		args := append(TerminalOpenArgs(termChoice), script)
+		if err := exec.Command("open", args...).Run(); err == nil {
+			opened = true
+		} else if termChoice != "" && exec.Command("open", "-a", "Terminal", script).Run() == nil {
 			opened = true
 		}
 	}
@@ -734,6 +751,7 @@ func (m *Manager) stopLocked(task *Task, session *Session) error {
 	if session.Mode == ModeTmux && session.TmuxName != "" {
 		_ = exec.Command("tmux", "kill-session", "-t", session.TmuxName).Run()
 	} else if session.PID > 0 {
+		_ = syscall.Kill(-session.PID, syscall.SIGTERM)
 		_ = syscall.Kill(session.PID, syscall.SIGTERM)
 	}
 	m.transition(session, SessionEnded, "")
@@ -961,28 +979,7 @@ func (m *Manager) applyEventLocked(task *Task, session *Session, ev Event) {
 }
 
 func (m *Manager) GitReview(task *Task) (*GitReview, error) {
-	res, err := Review(task)
-	if err != nil {
-		return nil, err
-	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if task.Baseline != nil && len(res.Files) > 0 {
-		for _, other := range m.Store.Data.Tasks {
-			if other.ID != task.ID && other.Status != StatusDone && other.Baseline != nil && other.Baseline.Root == task.Baseline.Root {
-				for _, s := range other.Sessions {
-					if s.Kind == "work" {
-						res.Blocked = fmt.Sprintf("同一仓库还有未完成任务「%s」，请先在外部核对改动归属并提交，或为任务使用独立工作目录。", other.Title)
-						break
-					}
-				}
-			}
-			if res.Blocked != "" {
-				break
-			}
-		}
-	}
-	return res, nil
+	return Review(task)
 }
 
 func (m *Manager) Finish(task *Task, automatic bool, action, message, token string) error {
@@ -1021,14 +1018,16 @@ func (m *Manager) Finish(task *Task, automatic bool, action, message, token stri
 	if err != nil {
 		return err
 	}
-	if info.Blocked != "" {
-		return Fail(info.Blocked, http.StatusConflict)
-	}
-	if token != "" && token != info.Token {
-		return Fail("diff 已更新，请重新查看后确认。", http.StatusConflict)
-	}
-	if !automatic && token == "" {
-		return Fail("请先查看 diff 并确认。", http.StatusConflict)
+	if !automatic && action != "none" {
+		if info.Blocked != "" {
+			return Fail(info.Blocked, http.StatusConflict)
+		}
+		if token != "" && token != info.Token {
+			return Fail("diff 已更新，请重新查看后确认。", http.StatusConflict)
+		}
+		if token == "" {
+			return Fail("请先查看 diff 并确认。", http.StatusConflict)
+		}
 	}
 
 	m.mu.Lock()
@@ -1036,12 +1035,12 @@ func (m *Manager) Finish(task *Task, automatic bool, action, message, token stri
 	if task.Baseline != nil {
 		root = task.Baseline.Root
 	}
-	if root != "" && m.repoLocks[root] {
+	if !automatic && action != "none" && root != "" && m.repoLocks[root] {
 		m.mu.Unlock()
 		return Fail("项目正在提交，请稍后重试。", http.StatusConflict)
 	}
 	m.completing[task.ID] = true
-	if root != "" {
+	if !automatic && action != "none" && root != "" {
 		m.repoLocks[root] = true
 	}
 	task.Completion = &CompletionState{Automatic: automatic, Action: action, Message: message}
@@ -1063,7 +1062,7 @@ func (m *Manager) Finish(task *Task, automatic bool, action, message, token stri
 		m.mu.Lock()
 		task.Completion = nil
 		delete(m.completing, task.ID)
-		if root != "" {
+		if !automatic && action != "none" && root != "" {
 			delete(m.repoLocks, root)
 		}
 		m.Store.Touch(task)
@@ -1075,17 +1074,13 @@ func (m *Manager) Finish(task *Task, automatic bool, action, message, token stri
 		expectTok = info.Token
 	}
 
-	needCommit := task.Git == nil || task.Git.Status != "committed" || len(info.Files) > 0 || info.Head != task.Git.Hash
-	if needCommit {
-		gitRes, err := CommitTask(task, expectTok, filepath.Join(taskDir, "commit-message.txt"))
+	if automatic || action == "none" {
+		gitRes, err := DetectTaskGitResult(task, automatic)
 		if err != nil {
 			m.mu.Lock()
 			if task.Status != StatusDone {
 				task.Status = StatusWaiting
 				task.Error = err.Error()
-				if task.Git == nil || task.Git.Status != "committed" {
-					task.Git = &GitResult{Status: "error", Automatic: automatic, Error: task.Error}
-				}
 			}
 			m.mu.Unlock()
 			return err
@@ -1094,6 +1089,27 @@ func (m *Manager) Finish(task *Task, automatic bool, action, message, token stri
 		task.Git = gitRes
 		m.Store.Touch(task)
 		m.mu.Unlock()
+	} else {
+		needCommit := task.Git == nil || task.Git.Status != "committed" || len(info.Files) > 0 || info.Head != task.Git.Hash
+		if needCommit {
+			gitRes, err := CommitTask(task, expectTok, filepath.Join(taskDir, "commit-message.txt"))
+			if err != nil {
+				m.mu.Lock()
+				if task.Status != StatusDone {
+					task.Status = StatusWaiting
+					task.Error = err.Error()
+					if task.Git == nil || task.Git.Status != "committed" {
+						task.Git = &GitResult{Status: "error", Automatic: automatic, Error: task.Error}
+					}
+				}
+				m.mu.Unlock()
+				return err
+			}
+			m.mu.Lock()
+			task.Git = gitRes
+			m.Store.Touch(task)
+			m.mu.Unlock()
+		}
 	}
 
 	if action == "pr" {
@@ -1435,7 +1451,9 @@ func (m *Manager) Tick() error {
 		}
 
 		needAutoFinish := false
+		var notifyEv *TaskNotifyEvent
 		if task.Status != StatusDone && !m.launching[task.ID] && !m.completing[task.ID] {
+			prevStatus := task.Status
 			if task.Completion != nil {
 				task.Completion = nil
 				task.Error = "服务在完成流程中重启，请重新查看 diff 并确认；已有提交会被保留。"
@@ -1452,14 +1470,22 @@ func (m *Manager) Tick() error {
 				if next != task.Status {
 					task.Status = next
 					changed = true
+					if prevStatus == StatusDoing && next == StatusWaiting {
+						notifyEv = m.buildTaskNotifyEventLocked(task)
+					}
 				}
 			}
 		}
 		if changed {
 			m.Store.Touch(task)
 		}
+		m.syncAwakeLocked()
 		needAutoArchive := task.Status == StatusDone && task.Archive.Status == "idle" && !m.completing[task.ID] && !needAutoFinish
 		m.mu.Unlock()
+
+		if notifyEv != nil {
+			m.emitTaskEnd(*notifyEv)
+		}
 
 		if needAutoFinish {
 			msg := fmt.Sprintf("feat: task %s\n\n- 完成任务 %s 的改动。", task.Title, task.ID)
@@ -1467,12 +1493,58 @@ func (m *Manager) Tick() error {
 				m.mu.Lock()
 				task.Status = StatusWaiting
 				task.Error = err.Error()
+				ev := m.buildTaskNotifyEventLocked(task)
 				m.Store.Touch(task)
 				m.mu.Unlock()
+				if ev != nil {
+					m.emitTaskEnd(*ev)
+				}
+			} else {
+				m.mu.Lock()
+				ev := m.buildTaskNotifyEventLocked(task)
+				m.mu.Unlock()
+				if ev != nil {
+					m.emitTaskEnd(*ev)
+				}
 			}
 		} else if needAutoArchive {
 			_ = m.Archive(task)
 		}
 	}
 	return nil
+}
+
+func (m *Manager) buildTaskNotifyEventLocked(task *Task) *TaskNotifyEvent {
+	s := m.Store.Data.Settings.Normalized()
+	if s.NotifyTaskEnd != nil && !*s.NotifyTaskEnd {
+		return nil
+	}
+	tool := task.Tool
+	var activeMs int64
+	errMsg := task.Error
+	for _, sess := range task.Sessions {
+		if sess.Kind != "work" {
+			continue
+		}
+		tool = sess.Tool
+		activeMs += sess.ActiveMs
+		if errMsg == "" && sess.Error != "" {
+			errMsg = sess.Error
+		}
+	}
+	return &TaskNotifyEvent{
+		TaskID:     task.ID,
+		Title:      task.Title,
+		Status:     task.Status,
+		Tool:       tool,
+		ProjectDir: m.workingDir(task),
+		ActiveMs:   activeMs,
+		Error:      errMsg,
+	}
+}
+
+func (m *Manager) emitTaskEnd(ev TaskNotifyEvent) {
+	if m.OnTaskEnd != nil {
+		m.OnTaskEnd(ev)
+	}
 }

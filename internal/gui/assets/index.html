@@ -5,8 +5,18 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#faf9f5" />
     <title>Loom · Agent 任务看板</title>
-    <script type="module" crossorigin src="/assets/index-DLNnTVKv.js"></script>
-    <link rel="stylesheet" crossorigin href="/assets/index-CsJasD4V.css">
+    <script>
+      (function () {
+        try {
+          var theme = localStorage.getItem('loom.theme');
+          if (theme === 'light' || theme === 'dark') document.documentElement.dataset.theme = theme;
+          var size = parseInt(localStorage.getItem('loom.textSize') || '100', 10);
+          if (size >= 100) document.documentElement.style.setProperty('--zoom', String(size / 100));
+        } catch (e) {}
+      })();
+    </script>
+    <script type="module" crossorigin src="/assets/index-C3FPvZO6.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-DqVMcCr-.css">
   </head>
   <body><div id="root"></div></body>
 </html>

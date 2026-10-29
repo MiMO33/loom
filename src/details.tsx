@@ -131,7 +131,6 @@ export function TaskDetail({ task, now, health, defaultProjectDir, projectDirs, 
                   <button
                     type="button"
                     className="text-button"
-                    style={{ marginLeft: 10 }}
                     onClick={() => void openFolder(effectiveProjectDir).catch(err => setError((err as Error).message))}
                   >
                     打开目录
@@ -141,7 +140,6 @@ export function TaskDetail({ task, now, health, defaultProjectDir, projectDirs, 
                   <button
                     type="button"
                     className="text-button"
-                    style={{ marginLeft: 10 }}
                     onClick={() => void changeTaskProjectDir()}
                   >
                     切换目录…

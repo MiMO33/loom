@@ -43,7 +43,7 @@
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  font-size: 11px;
+  font-size: 12px;
   color: var(--muted);
   padding: 0 4px;
 }
@@ -52,14 +52,14 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-width: 26px;
-  height: 26px;
+  min-width: 28px;
+  height: 28px;
   padding: 0 6px;
   border: 1px solid transparent;
   border-radius: 5px;
   background: transparent;
   color: var(--ink-secondary);
-  font-size: 12px;
+  font-size: 12.5px;
   font-weight: 600;
   transition: background 100ms, color 100ms, border-color 100ms;
 }
@@ -100,10 +100,13 @@
 .rich-markdown-mode-segmented button {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  padding: 3px 8px;
+  justify-content: center;
+  gap: 5px;
+  height: 24px;
+  padding: 0 9px;
   border-radius: 4px;
-  font-size: 10.5px;
+  font-size: 12px;
+  line-height: 1;
   color: var(--muted);
   transition: background 100ms, color 100ms;
 }
@@ -142,7 +145,7 @@
 
 .rich-markdown-more-label {
   padding: 4px 8px 2px;
-  font-size: 10px;
+  font-size: 11px;
   color: var(--muted);
   font-weight: 500;
 }
@@ -155,7 +158,7 @@
   width: 100%;
   padding: 6px 9px;
   border-radius: 5px;
-  font-size: 11.5px;
+  font-size: 12.5px;
   color: var(--ink-secondary);
   text-align: left;
 }
@@ -230,7 +233,7 @@
 .rich-markdown-editor {
   min-height: 100%;
   padding: 22px 28px 64px;
-  font-size: 14px;
+  font-size: 14.5px;
   line-height: 1.8;
   color: var(--ink);
   outline: none;
@@ -238,7 +241,7 @@
 
 .rich-markdown-editor.is-compact {
   padding: 12px 14px 32px;
-  font-size: 12.5px;
+  font-size: 13.5px;
 }
 
 .rich-markdown-editor p.is-editor-empty:first-child::before,
@@ -419,7 +422,7 @@
   margin: 0;
   border-radius: 7px;
   overflow-x: auto;
-  font: 11.5px/1.6 ui-monospace, "SFMono-Regular", monospace;
+  font: 12.5px/1.65 ui-monospace, "SFMono-Regular", monospace;
   background: transparent;
 }
 
@@ -467,7 +470,7 @@
   width: 100%;
   margin: 1em 0;
   border-collapse: collapse;
-  font-size: 12px;
+  font-size: 13px;
 }
 
 .rich-markdown-editor th,
@@ -849,8 +852,8 @@
   flex: 1;
   border: 0 !important;
   border-radius: 0 !important;
-  padding: 20px 26px !important;
-  font: 13px/1.75 ui-monospace, "SFMono-Regular", "PingFang SC", monospace !important;
+  padding: 20px 28px !important;
+  font: 13.5px/1.75 ui-monospace, "SFMono-Regular", "PingFang SC", monospace !important;
   background: var(--surface) !important;
   color: var(--ink) !important;
   resize: none;
